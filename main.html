@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>ASCII Tetris</title>
+    <style>
+        body {
+            background-color: black;
+            color: white;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        pre {
+            font-family: monospace;
+            font-size: 18px;
+            line-height: 1.2;
+            white-space: pre;
+        }
+    </style>
+</head>
+<body>
+    <pre id="game-display"></pre>
+    <script>
+        const COLS = 10;
+        const ROWS = 20;
+        const BLOCK = '[]';
+        const GHOST = '..';
+        const EMPTY = '  ';
+
+        const SHAPES = {
+            I: [[0,0,0,0],[1,1,1,1],[0,0,0,0],[0,0,0,0]],
+            J: [[1,0,0],[1,1,1],[0,0,0]],
+            L: [[0,0,1],[1,1,1],[0,0,0]],
+            O: [[1,1],[1,1]],
+            S: [[0,1,1],[1,1,0],[0,0,0]],
+            T: [[0,1,0],[1,1,1],[0,0,0]],
+            Z: [[1,1,0],[0,1,1],[0,0,0]]
+        };
+        const SHAPE_KEYS = Object.keys(SHAPES);
+
+        let state = 'START';
+        let board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+        let score = 0;
+        let lines = 0;
+        let level = 1;
+        let speed = 1000;
+        let lastDropTime = 0;
+        let reqId = null;
+
+        let currentPiece = null;
+        let nextPieceKey = null;
+        let holdPieceKey = null;
+        let canHold = true;
+        let countdownVal = 0;
+
+        function getRandomShapeKey() {
+            const arr = new Uint32Array(1);
+            window.crypto.getRandomValues(arr);
+            return SHAPE_KEYS[arr[0] % SHAPE_KEYS.length];
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if(["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].indexOf(e.code) > -1) {
+                e.preventDefault();
+            }
+            if (state === 'START') {
+                if (e.code === 'Space') startGame();
+                return;
+            }
+            if (state === 'PAUSED') {
+                if (e.key.toLowerCase() === 'r') resumeGame();
+                else if (e.key.toLowerCase() === 'q') {
+                    state = 'GAME_OVER';
+                    render();
+                }
+                return;
+            }
+            if (state === 'GAME_OVER') {
+                if (e.key.toLowerCase() === 'r') startGame();
+                return;
+            }
+            if (state === 'PLAYING') {
+                switch(e.code) {
+                    case 'ArrowLeft': movePiece(-1, 0); break;
+                    case 'ArrowRight': movePiece(1, 0); break;
+                    case 'ArrowUp': rotatePiece(); break;
+                    case 'ArrowDown':
+                        if (movePiece(0, 1)) score += 1;
+                        break;
+                    case 'Space': hardDrop(); break;
+                    case 'KeyC': holdPiece(); break;
+                    case 'KeyQ':
+                        state = 'PAUSED';
+                        render();
+                        break;
+                }
+            }
+        });
+
+        function startGame() {
+            board = Array.from({ length: ROWS }, () => Array(COLS).fill(0));
+            score = 0;
+            lines = 0;
+            level = 1;
+            speed = 1000;
+            holdPieceKey = null;
+            nextPieceKey = getRandomShapeKey();
+            spawnPiece();
+            state = 'PLAYING';
+            lastDropTime = performance.now();
+            if (reqId) cancelAnimationFrame(reqId);
+            gameLoop(lastDropTime);
+        }
+
+        function resumeGame() {
+            startCountdown(3);
+        }
+
+        function startCountdown(val) {
+            state = 'COUNTDOWN';
+            countdownVal = val;
+            render();
+            if (val > 0) {
+                setTimeout(() => startCountdown(val - 1), 1000);
+            } else {
+                state = 'PLAYING';
+                lastDropTime = performance.now();
+                gameLoop(lastDropTime);
+            }
+        }
+
+        function spawnPiece() {
+            const key = nextPieceKey;
+            nextPieceKey = getRandomShapeKey();
+            currentPiece = {
+                key: key,
+                shape: SHAPES[key],
+                x: Math.floor((COLS - SHAPES[key][0].length) / 2),
+                y: 0
+            };
+            canHold = true;
+            if (checkCollision(currentPiece.shape, currentPiece.x, currentPiece.y)) {
+                state = 'GAME_OVER';
+            }
+            render();
+        }
+
+        function checkCollision(shape, x, y) {
+            for (let r = 0; r < shape.length; r++) {
+                for (let c = 0; c < shape[r].length; c++) {
+                    if (shape[r][c]) {
+                        let newX = x + c;
+                        let newY = y + r;
+                        if (newX < 0 || newX >= COLS || newY >= ROWS) return true;
+                        if (newY >= 0 && board[newY][newX]) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function movePiece(dx, dy) {
+            if (!checkCollision(currentPiece.shape, currentPiece.x + dx, currentPiece.y + dy)) {
+                currentPiece.x += dx;
+                currentPiece.y += dy;
+                render();
+                return true;
+            }
+            return false;
+        }
+
+        function rotatePiece() {
+            const shape = currentPiece.shape;
+            const newShape = shape[0].map((val, index) => shape.map(row => row[index]).reverse());
+            const kicks = [0, -1, 1, -2, 2];
+            for (let offset of kicks) {
+                if (!checkCollision(newShape, currentPiece.x + offset, currentPiece.y)) {
+                    currentPiece.shape = newShape;
+                    currentPiece.x += offset;
+                    render();
+                    return;
+                }
+            }
+        }
+
+        function getGhostY() {
+            let ghostY = currentPiece.y;
+            while (!checkCollision(currentPiece.shape, currentPiece.x, ghostY + 1)) {
+                ghostY++;
+            }
+            return ghostY;
+        }
+
+        function hardDrop() {
+            let dropDistance = 0;
+            while (!checkCollision(currentPiece.shape, currentPiece.x, currentPiece.y + 1)) {
+                currentPiece.y++;
+                dropDistance++;
+            }
+            score += dropDistance * 2;
+            lockPiece();
+        }
+
+        function holdPiece() {
+            if (!canHold) return;
+            if (holdPieceKey === null) {
+                holdPieceKey = currentPiece.key;
+                spawnPiece();
+            } else {
+                const temp = currentPiece.key;
+                currentPiece.key = holdPieceKey;
+                currentPiece.shape = SHAPES[holdPieceKey];
+                currentPiece.x = Math.floor((COLS - currentPiece.shape[0].length) / 2);
+                currentPiece.y = 0;
+                holdPieceKey = temp;
+                render();
+            }
+            canHold = false;
+        }
+
+        function lockPiece() {
+            for (let r = 0; r < currentPiece.shape.length; r++) {
+                for (let c = 0; c < currentPiece.shape[r].length; c++) {
+                    if (currentPiece.shape[r][c]) {
+                        if (currentPiece.y + r < 0) {
+                            state = 'GAME_OVER';
+                            render();
+                            return;
+                        }
+                        board[currentPiece.y + r][currentPiece.x + c] = 1;
+                    }
+                }
+            }
+            clearLines();
+            if (state !== 'GAME_OVER') {
+                spawnPiece();
+            }
+        }
+
+        function clearLines() {
+            let linesClearedThisTurn = 0;
+            for (let r = ROWS - 1; r >= 0; r--) {
+                if (board[r].every(cell => cell === 1)) {
+                    board.splice(r, 1);
+                    board.unshift(Array(COLS).fill(0));
+                    linesClearedThisTurn++;
+                    r++; 
+                }
+            }
+
+            if (linesClearedThisTurn > 0) {
+                lines += linesClearedThisTurn;
+                let baseScore = 0;
+                if (linesClearedThisTurn === 1) baseScore = 100;
+                else if (linesClearedThisTurn === 2) baseScore = 300;
+                else if (linesClearedThisTurn === 3) baseScore = 500;
+                else if (linesClearedThisTurn === 4) baseScore = 800;
+
+                score += baseScore * level;
+
+                const newLevel = Math.floor(lines / 25) + 1;
+                if (newLevel > level) {
+                    level = newLevel;
+                    speed = 1000 * Math.pow(0.9, level - 1);
+                }
+            }
+        }
+
+        function gameLoop(time) {
+            if (state !== 'PLAYING') return;
+            const delta = time - lastDropTime;
+            if (delta >= speed) {
+                if (!movePiece(0, 1)) {
+                    lockPiece();
+                }
+                lastDropTime = time;
+            }
+            reqId = requestAnimationFrame(gameLoop);
+        }
+
+        function padCenter(str, length) {
+            const padLeft = Math.floor((length - str.length) / 2);
+            const padRight = length - str.length - padLeft;
+            return ' '.repeat(Math.max(0, padLeft)) + str + ' '.repeat(Math.max(0, padRight));
+        }
+
+        function renderShapeBlock(shape, key) {
+            let res = ['        ', '        ', '        ', '        '];
+            if (!key) return res;
+            
+            let minC = 4, maxC = -1, minR = 4, maxR = -1;
+            for (let r = 0; r < shape.length; r++) {
+                for (let c = 0; c < shape[r].length; c++) {
+                    if (shape[r][c]) {
+                        if(c < minC) minC = c;
+                        if(c > maxC) maxC = c;
+                        if(r < minR) minR = r;
+                        if(r > maxR) maxR = r;
+                    }
+                }
+            }
+            let w = maxC - minC + 1;
+            let h = maxR - minR + 1;
+            let offX = Math.floor((4 - w)/2) - minC;
+            let offY = Math.floor((4 - h)/2) - minR;
+
+            for (let r = 0; r < 4; r++) {
+                let rowStr = '';
+                for (let c = 0; c < 4; c++) {
+                    let sr = r - offY;
+                    let sc = c - offX;
+                    if (sr >= 0 && sr < shape.length && sc >= 0 && sc < shape[sr].length && shape[sr][sc]) {
+                        rowStr += BLOCK;
+                    } else {
+                        rowStr += '  ';
+                    }
+                }
+                res[r] = rowStr;
+            }
+            return res;
+        }
+
+        function render() {
+            const display = document.getElementById('game-display');
+
+            if (state === 'START') {
+                display.textContent = "\n\n\n\n\n\n\n         === ASCII TETRIS ===         \n\n\n       [ Press SPACEBAR to Start ]       \n";
+                return;
+            }
+
+            if (state === 'COUNTDOWN') {
+                 display.textContent = "\n\n\n\n\n\n\n         === RESUMING IN ===         \n\n\n                  " + countdownVal + "                  \n";
+                 return;
+            }
+
+            let displayBoard = board.map(row => [...row]);
+
+            if ((state === 'PLAYING' || state === 'PAUSED' || state === 'GAME_OVER') && currentPiece) {
+                const ghostY = getGhostY();
+                for (let r = 0; r < currentPiece.shape.length; r++) {
+                    for (let c = 0; c < currentPiece.shape[r].length; c++) {
+                        if (currentPiece.shape[r][c]) {
+                            if (ghostY + r >= 0 && ghostY + r < ROWS && currentPiece.x + c >= 0 && currentPiece.x + c < COLS) {
+                                if (displayBoard[ghostY + r][currentPiece.x + c] === 0) {
+                                    displayBoard[ghostY + r][currentPiece.x + c] = 2; 
+                                }
+                            }
+                        }
+                    }
+                }
+                for (let r = 0; r < currentPiece.shape.length; r++) {
+                    for (let c = 0; c < currentPiece.shape[r].length; c++) {
+                        if (currentPiece.shape[r][c]) {
+                            if (currentPiece.y + r >= 0 && currentPiece.y + r < ROWS && currentPiece.x + c >= 0 && currentPiece.x + c < COLS) {
+                                displayBoard[currentPiece.y + r][currentPiece.x + c] = 3;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let boardStrings = [];
+            for (let r = 0; r < ROWS; r++) {
+                let rowStr = '';
+                for (let c = 0; c < COLS; c++) {
+                    const cell = displayBoard[r][c];
+                    if (cell === 1 || cell === 3) rowStr += BLOCK;
+                    else if (cell === 2) rowStr += GHOST;
+                    else rowStr += EMPTY;
+                }
+                boardStrings.push(rowStr);
+            }
+
+            const holdLines = renderShapeBlock(holdPieceKey ? SHAPES[holdPieceKey] : null, holdPieceKey);
+            const nextLines = renderShapeBlock(nextPieceKey ? SHAPES[nextPieceKey] : null, nextPieceKey);
+
+            const scoreStr = padCenter(score.toString(), 8);
+            const linesStr = padCenter(lines.toString(), 8);
+            const levelStr = padCenter(level.toString(), 8);
+            const speedStr = padCenter(Math.round(speed) + 'ms', 8);
+
+            let linesRender = [
+                " [ HOLD ]         [ BOARD (10x20) ]      [ NEXT ] ",
+                "+--------+      +--------------------+    +--------+",
+                "|" + holdLines[0] + "|      |" + boardStrings[0] + "|    |" + nextLines[0] + "|",
+                "|" + holdLines[1] + "|      |" + boardStrings[1] + "|    |" + nextLines[1] + "|",
+                "|" + holdLines[2] + "|      |" + boardStrings[2] + "|    |" + nextLines[2] + "|",
+                "|" + holdLines[3] + "|      |" + boardStrings[3] + "|    |" + nextLines[3] + "|",
+                "+--------+      |" + boardStrings[4] + "|    +--------+",
+                "                |" + boardStrings[5] + "|              ",
+                " [ SCORE]       |" + boardStrings[6] + "|    [ LEVEL]  ",
+                " " + scoreStr + "       |" + boardStrings[7] + "|     " + levelStr + " ",
+                "                |" + boardStrings[8] + "|              ",
+                " [ LINES]       |" + boardStrings[9] + "|    [ SPEED]  ",
+                " " + linesStr + "       |" + boardStrings[10] + "|     " + speedStr + " ",
+                "                |" + boardStrings[11] + "|              ",
+                "                |" + boardStrings[12] + "|              ",
+                "                |" + boardStrings[13] + "|              ",
+                "                |" + boardStrings[14] + "|              ",
+                "                |" + boardStrings[15] + "|              ",
+                "                |" + boardStrings[16] + "|              ",
+                "                |" + boardStrings[17] + "|              ",
+                "                |" + boardStrings[18] + "|              ",
+                "                |" + boardStrings[19] + "|              ",
+                "                +--------------------+              "
+            ];
+
+            if (state === 'PAUSED') {
+                linesRender[10] = "                |" + padCenter('[ PAUSED ]', 20) + "|              ";
+                linesRender[11] = " [ LINES]       |" + padCenter("[Press 'R']", 20) + "|    [ SPEED]  ";
+                linesRender[12] = " " + linesStr + "       |" + padCenter("[to Resume]", 20) + "|     " + speedStr + " ";
+                linesRender[13] = "                |" + padCenter("[Press 'Q']", 20) + "|              ";
+                linesRender[14] = "                |" + padCenter("[to Quit]  ", 20) + "|              ";
+            } else if (state === 'GAME_OVER') {
+                linesRender[10] = "                |" + padCenter('[GAME OVER]', 20) + "|              ";
+                linesRender[11] = " [ LINES]       |" + padCenter("Score:" + score, 20) + "|    [ SPEED]  ";
+                linesRender[12] = " " + linesStr + "       |" + padCenter("[Press 'R']", 20) + "|     " + speedStr + " ";
+                linesRender[13] = "                |" + padCenter("[to Restart]", 20) + "|              ";
+            }
+
+            display.textContent = linesRender.join('\n');
+        }
+
+        render();
+    </script>
+</body>
+</html>
